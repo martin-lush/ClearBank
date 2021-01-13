@@ -1,87 +1,62 @@
-﻿using ClearBank.DeveloperTest.Data;
+﻿using ClearBank.DeveloperTest.Config;
+using ClearBank.DeveloperTest.Data;
+using ClearBank.DeveloperTest.Helpers;
 using ClearBank.DeveloperTest.Types;
-using System.Configuration;
+using System;
 
 namespace ClearBank.DeveloperTest.Services
 {
     public class PaymentService : IPaymentService
     {
+        private readonly IAccountDataStore _accountDataStore;
+
+        public PaymentService(IAccountDataStore accountDataStore)
+        {
+            // NOTE: This would typically be controlled via a Dependency Injection framework
+            if (accountDataStore is null)
+            {
+                var config = new AccountDataStoreConfig();
+                accountDataStore = AccountDataStoreHelper.GetAccountDataStore(config);
+            }
+
+            _accountDataStore = accountDataStore;
+        }
+
         public MakePaymentResult MakePayment(MakePaymentRequest request)
         {
-            var dataStoreType = ConfigurationManager.AppSettings["DataStoreType"];
-
-            Account account = null;
-
-            if (dataStoreType == "Backup")
+            if (request is null)
             {
-                var accountDataStore = new BackupAccountDataStore();
-                account = accountDataStore.GetAccount(request.DebtorAccountNumber);
-            }
-            else
-            {
-                var accountDataStore = new AccountDataStore();
-                account = accountDataStore.GetAccount(request.DebtorAccountNumber);
+                throw new ArgumentNullException(nameof(request));
             }
 
-            var result = new MakePaymentResult();
+            var result = new MakePaymentResult { Success = false };
 
-            switch (request.PaymentScheme)
+            var account = _accountDataStore.GetAccount(request.DebtorAccountNumber);
+            var paymentSchemeValidator = PaymentSchemeValidatorHelper.GetValidatorForPaymentScheme(request.PaymentScheme);
+
+            var isValidPaymentRequest = false;
+
+            if (account != null && paymentSchemeValidator != null)
             {
-                case PaymentScheme.Bacs:
-                    if (account == null)
-                    {
-                        result.Success = false;
-                    }
-                    else if (!account.AllowedPaymentSchemes.HasFlag(AllowedPaymentSchemes.Bacs))
-                    {
-                        result.Success = false;
-                    }
-                    break;
+                isValidPaymentRequest = paymentSchemeValidator.Validate(account, request);
 
-                case PaymentScheme.FasterPayments:
-                    if (account == null)
-                    {
-                        result.Success = false;
-                    }
-                    else if (!account.AllowedPaymentSchemes.HasFlag(AllowedPaymentSchemes.FasterPayments))
-                    {
-                        result.Success = false;
-                    }
-                    else if (account.Balance < request.Amount)
-                    {
-                        result.Success = false;
-                    }
-                    break;
+                // NOTE: Other validation missing such as:
+                // * PaymentDate is in an acceptable range
+                // * Amount is in an acceptable range
 
-                case PaymentScheme.Chaps:
-                    if (account == null)
-                    {
-                        result.Success = false;
-                    }
-                    else if (!account.AllowedPaymentSchemes.HasFlag(AllowedPaymentSchemes.Chaps))
-                    {
-                        result.Success = false;
-                    }
-                    else if (account.Status != AccountStatus.Live)
-                    {
-                        result.Success = false;
-                    }
-                    break;
+                // Note: Other considerations include returning the reasons why validation fail in the result
             }
 
-            if (result.Success)
+            if (isValidPaymentRequest)
             {
+                // NOTE: At this point we have not checked the Creditor Account
+                // An assumption is made here that this would be external to this system.
+                // In reality we'd have an API call, orchestrator or reconciliation process to handle things.
                 account.Balance -= request.Amount;
 
-                if (dataStoreType == "Backup")
+                if (_accountDataStore.UpdateAccount(account))
                 {
-                    var accountDataStore = new BackupAccountDataStore();
-                    accountDataStore.UpdateAccount(account);
-                }
-                else
-                {
-                    var accountDataStore = new AccountDataStore();
-                    accountDataStore.UpdateAccount(account);
+                    result = new MakePaymentResult { Success = true };
                 }
             }
 
